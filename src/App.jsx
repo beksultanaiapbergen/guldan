@@ -1,5 +1,10 @@
 import { useState, useRef, useEffect } from "react";
 import { ChatRoom, ChatList } from "./Chat";
+import { db } from "./firebase";
+import {
+  collection, addDoc, onSnapshot, doc,
+  updateDoc, deleteDoc, query, orderBy, serverTimestamp
+} from "firebase/firestore";
 
 const DEMO = [
   { id:1, title:"Пионы в крафте", price:"18 500", city:"Алматы", flowers:["Пионы","Розы"], occasion:"День рождения", freshness:0, stems:"25", description:"Роскошные пионы нежно-розового цвета, упакованы в крафт с атласной лентой.", sellerName:"Айгерим", sellerPhone:"77051234567", showPhone:"hidden", photo:null },
@@ -46,19 +51,58 @@ function FlowerBg() {
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
 export default function App() {
   const [mode, setMode] = useState(null);
-  const [listings, setListings] = useState(DEMO);
+  const [listings, setListings] = useState([]);
   const [pending, setPending] = useState([]);
   const [showAdmin, setShowAdmin] = useState(false);
   const [adminCode, setAdminCode] = useState("");
   const [adminErr, setAdminErr] = useState(false);
   const [vis, setVis] = useState(false);
+  const [chatSeller, setChatSeller] = useState(null);
   useEffect(()=>{const t=setTimeout(()=>setVis(true),60);return()=>clearTimeout(t);},[]);
 
-  const addPending = l => setPending(p=>[{...l,id:Date.now(),at:new Date().toLocaleString("ru-KZ")},...p]);
-  const approve = id => { const l=pending.find(x=>x.id===id); if(l){setListings(p=>[l,...p]);setPending(p=>p.filter(x=>x.id!==id));} };
-  const reject = id => setPending(p=>p.filter(x=>x.id!==id));
+  // Слушаем опубликованные объявления из Firebase
+  useEffect(()=>{
+    const q = query(collection(db,"listings"), orderBy("createdAt","desc"));
+    const unsub = onSnapshot(q, snap=>{
+      setListings(snap.docs.map(d=>({...d.data(), id:d.id})));
+    });
+    return unsub;
+  },[]);
 
-  const [chatSeller, setChatSeller] = useState(null); // {phone, name}
+  // Слушаем заявки на модерацию из Firebase
+  useEffect(()=>{
+    const q = query(collection(db,"pending"), orderBy("createdAt","desc"));
+    const unsub = onSnapshot(q, snap=>{
+      setPending(snap.docs.map(d=>({...d.data(), id:d.id})));
+    });
+    return unsub;
+  },[]);
+
+  // Добавить заявку в pending
+  const addPending = async l => {
+    await addDoc(collection(db,"pending"), {
+      ...l,
+      photo: l.photo || null,
+      createdAt: serverTimestamp(),
+      at: new Date().toLocaleString("ru-KZ"),
+    });
+  };
+
+  // Одобрить — перенести из pending в listings
+  const approve = async id => {
+    const item = pending.find(x=>x.id===id);
+    if(!item) return;
+    await addDoc(collection(db,"listings"), {
+      ...item,
+      createdAt: serverTimestamp(),
+    });
+    await deleteDoc(doc(db,"pending",id));
+  };
+
+  // Отклонить — удалить из pending
+  const reject = async id => {
+    await deleteDoc(doc(db,"pending",id));
+  };
 
   if(mode==="buy") return <BuyerView listings={listings} back={()=>setMode(null)}/>;
   if(mode==="sell") return <SellerView back={()=>setMode(null)} onPublish={l=>{addPending(l);setMode("sent");}} onChats={(phone,name)=>{setChatSeller({phone,name});setMode("chats");}}/>;
@@ -273,16 +317,6 @@ function Detail({listing:l,back}) {
   const PALBG=["linear-gradient(160deg,#fce4ec 0%,#f8bbd0 100%)","linear-gradient(160deg,#fff3e0 0%,#ffe0b2 100%)","linear-gradient(160deg,#e8f5e9 0%,#c8e6c9 100%)","linear-gradient(160deg,#e3f2fd 0%,#bbdefb 100%)","linear-gradient(160deg,#f3e5f5 0%,#e1bee7 100%)","linear-gradient(160deg,#fafafa 0%,#f5f5f5 100%)"];
   const bg=PALBG[l.id%PALBG.length];
 
-  const sendWA = () => {
-    if(phone.length<6) return;
-    let p=l.sellerPhone.replace(/\D/g,"");
-    if(p.startsWith("8")) p="7"+p.slice(1);
-    if(!p.startsWith("7")) p="7"+p;
-    const msg=encodeURIComponent(`🌸 *Новая заявка!*\n\n💐 *${l.title||"Букет"}* — ${l.price} ₸\n📍 ${l.city}\n\n📞 Покупатель: *${phone}*\n\nСвяжитесь если хотите продать 👆`);
-    window.open(`https://wa.me/${p}?text=${msg}`,"_blank");
-    setSent(true);
-  };
-
   return (
     <Shell>
       {/* Hero image */}
@@ -346,49 +380,28 @@ function Detail({listing:l,back}) {
           {l.showPhone==="show"&&(
             <div style={{display:"flex",flexDirection:"column",gap:10}}>
               <a href={`tel:+${l.sellerPhone}`} style={C.callBtn}>📞 Позвонить продавцу</a>
-              {!sent
-                ? <div style={C.contactForm}>
-                    <input style={C.inp} placeholder="Ваше имя" value={phone} onChange={e=>setPhone(e.target.value)}/>
-                    <button style={{...C.btn,background:"rgba(255,255,255,0.08)",boxShadow:"none"}} onClick={()=>{if(phone.trim())setSent("chat");}}>
-                      💬 Написать в чат
-                    </button>
-                  </div>
-                : null
-              }
+              {!sent&&(
+                <div style={C.contactForm}>
+                  <input style={C.inp} placeholder="Ваше имя" value={name} onChange={e=>setName(e.target.value)}/>
+                  <button style={{...C.btn,background:"rgba(255,255,255,0.08)",boxShadow:"none"}} onClick={()=>{if(name.trim())setSent("chat");}}>
+                    💬 Написать в чат
+                  </button>
+                </div>
+              )}
             </div>
           )}
-          {(l.showPhone==="hidden"||l.showPhone==="request")&&(
-            !sent
-              ? <div style={C.contactForm}>
-                  <input style={C.inp} placeholder="Ваше имя" value={name} onChange={e=>setName(e.target.value)}/>
-                  <input style={C.inp} placeholder="Ваш номер телефона" value={phone} onChange={e=>setPhone(e.target.value)}/>
-                  <button
-                    style={{...C.btn, opacity:name.trim()&&phone.length>6?1:0.4}}
-                    onClick={()=>{
-                      if(!name.trim()||phone.length<=6) return;
-                      // WhatsApp уведомление продавцу
-                      let p=l.sellerPhone.replace(/\D/g,"");
-                      if(p.startsWith("8")) p="7"+p.slice(1);
-                      if(!p.startsWith("7")) p="7"+p;
-                      const msg=encodeURIComponent(`🌸 *Новая заявка!*\n\n💐 *${l.title||"Букет"}* — ${l.price} ₸\n📍 ${l.city}\n\n👤 ${name}\n📞 ${phone}\n\nОтветьте в чате приложения или позвоните 👆`);
-                      window.open(`https://wa.me/${p}?text=${msg}`,"_blank");
-                      setSent("chat");
-                    }}
-                  >
-                    💬 Написать продавцу
-                  </button>
-                  <p style={C.contactHint}>🔒 Номер продавца скрыт — общайтесь в чате</p>
-                </div>
-              : null
-          )}
-          {sent==="chat"&&(
-            <ChatRoom
-              listing={l}
-              myName={name||phone}
-              myPhone={phone}
-              role="buyer"
-              onBack={()=>setSent(false)}
-            />
+          {(l.showPhone==="hidden"||l.showPhone==="request")&&!sent&&(
+            <div style={C.contactForm}>
+              <input style={C.inp} placeholder="Ваше имя" value={name} onChange={e=>setName(e.target.value)}/>
+              <input style={C.inp} placeholder="Ваш номер телефона" value={phone} onChange={e=>setPhone(e.target.value)}/>
+              <button
+                style={{...C.btn, opacity:name.trim()&&phone.length>6?1:0.4}}
+                onClick={()=>{ if(name.trim()&&phone.length>6) setSent("chat"); }}
+              >
+                💬 Написать продавцу
+              </button>
+              <p style={C.contactHint}>🔒 Номер продавца скрыт — общайтесь в чате</p>
+            </div>
           )}
         </div>
       </div>
@@ -516,9 +529,8 @@ function SellerView({back,onPublish}) {
               <Label>Показывать номер покупателям?</Label>
               <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:4}}>
                 {[
-                  {v:"hidden",ic:"🔒",t:"Скрыть",s:"Покупатель оставит заявку через WhatsApp"},
-                  {v:"request",ic:"📨",t:"По запросу",s:"Вы получите сообщение и решите сами"},
-                  {v:"show",ic:"📞",t:"Показать всем",s:"Номер виден в объявлении"},
+                  {v:"hidden",ic:"🔒",t:"Скрыть номер",s:"Покупатель пишет в чат — вы отвечаете сами"},
+                  {v:"show",ic:"📞",t:"Показать номер",s:"Номер виден всем покупателям в объявлении"},
                 ].map(o=>(
                   <button key={o.v} style={{...C.radioOpt,borderColor:form.showPhone===o.v?"rgba(251,191,36,0.5)":"rgba(255,255,255,0.07)",background:form.showPhone===o.v?"rgba(251,191,36,0.07)":"rgba(255,255,255,0.02)"}} onClick={()=>set("showPhone",o.v)}>
                     <div style={{...C.radioCircle,borderColor:form.showPhone===o.v?"#fbbf24":"rgba(255,255,255,0.2)"}}>
@@ -678,7 +690,7 @@ function AdminPanel({pending,listings,approve,reject,back}) {
 
         {tab==="pending"&&(
           pending.length===0
-            ? <div style={C.empty}>✅<br/>Нет заявок</div>
+            ? <div style={C.empty}>✅<br/>Нет заявок на модерацию</div>
             : pending.map(l=>(
               <div key={l.id} style={C.adminCard}>
                 <div style={C.adminTop}>
@@ -688,15 +700,38 @@ function AdminPanel({pending,listings,approve,reject,back}) {
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:15,fontWeight:700,color:"#fff",marginBottom:3}}>{l.title||"Букет"}</div>
                     <div style={{fontSize:20,fontWeight:800,background:"linear-gradient(135deg,#f43f5e,#fb923c)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>{l.price} ₸</div>
-                    <div style={{fontSize:12,color:"rgba(255,255,255,0.3)",marginTop:2}}>📍 {l.city} · {l.stems} шт · {l.at}</div>
+                    <div style={{fontSize:12,color:"rgba(255,255,255,0.3)",marginTop:2}}>📍 {l.city} · {l.stems&&l.stems+" шт ·"} {l.at}</div>
                   </div>
                 </div>
-                <div style={C.adminMeta}>
-                  {[["Продавец",l.sellerName],["Телефон",l.sellerPhone],["Свежесть",fr(l.freshness).label]].map(([k,v])=>(
-                    <div key={k} style={C.adminRow}><span style={C.adminK}>{k}</span><span style={C.adminV}>{v}</span></div>
-                  ))}
+
+                {/* Реальные данные продавца — видны только вам */}
+                <div style={{background:"rgba(251,191,36,0.06)",border:"1px solid rgba(251,191,36,0.2)",borderRadius:12,padding:"12px 14px"}}>
+                  <div style={{fontSize:9,letterSpacing:2,color:"rgba(251,191,36,0.6)",fontWeight:700,marginBottom:8}}>ДАННЫЕ ПРОДАВЦА (только для вас)</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <span style={{fontSize:12,color:"rgba(255,255,255,0.4)"}}>Имя</span>
+                      <span style={{fontSize:13,color:"#fff",fontWeight:600}}>{l.sellerName}</span>
+                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{fontSize:12,color:"rgba(255,255,255,0.4)"}}>Телефон</span>
+                      <a href={`tel:${l.sellerPhone}`} style={{fontSize:14,color:"#4ade80",fontWeight:700,textDecoration:"none",letterSpacing:0.5}}>
+                        📞 {l.sellerPhone}
+                      </a>
+                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <span style={{fontSize:12,color:"rgba(255,255,255,0.4)"}}>Свежесть</span>
+                      <span style={{fontSize:13,color:fr(l.freshness).color,fontWeight:600}}>{fr(l.freshness).label}</span>
+                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <span style={{fontSize:12,color:"rgba(255,255,255,0.4)"}}>Номер виден покупателям?</span>
+                      <span style={{fontSize:12,color:"rgba(255,255,255,0.6)"}}>{l.showPhone==="show"?"✅ Да":"🔒 Нет"}</span>
+                    </div>
+                  </div>
                 </div>
-                <div style={C.hint}>💡 Проверьте перевод 500 ₸ от <strong>{l.sellerPhone}</strong> в Kaspi</div>
+
+                <div style={{background:"rgba(74,222,128,0.05)",border:"1px solid rgba(74,222,128,0.15)",borderRadius:10,padding:"10px 12px",fontSize:12,color:"rgba(74,222,128,0.7)"}}>
+                  💳 Проверьте перевод <strong>500 ₸</strong> от <strong>{l.sellerPhone}</strong> в Kaspi
+                </div>
                 <div style={{display:"flex",gap:10}}>
                   <button style={C.rejectBtn} onClick={()=>reject(l.id)}>✕ Отклонить</button>
                   <button style={{...C.btn,flex:2}} className="gbtn" onClick={()=>approve(l.id)}>✓ Опубликовать</button>
@@ -705,20 +740,27 @@ function AdminPanel({pending,listings,approve,reject,back}) {
             ))
         )}
 
-        {tab==="pub"&&listings.map(l=>(
-          <div key={l.id} style={{...C.adminCard,padding:"14px 16px"}}>
-            <div style={{display:"flex",alignItems:"center",gap:12}}>
-              <div style={{width:48,height:48,borderRadius:10,background:"linear-gradient(135deg,#fce4ec,#f8bbd0)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>
-                {l.photo?<img src={l.photo} style={{width:"100%",height:"100%",objectFit:"cover",borderRadius:10}} alt=""/>:"💐"}
+        {tab==="pub"&&(
+          listings.length===0
+            ? <div style={C.empty}>💐<br/>Нет объявлений</div>
+            : listings.map(l=>(
+              <div key={l.id} style={{...C.adminCard,padding:"14px 16px"}}>
+                <div style={{display:"flex",alignItems:"center",gap:12}}>
+                  <div style={{width:48,height:48,borderRadius:10,background:"linear-gradient(135deg,#fce4ec,#f8bbd0)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>
+                    {l.photo?<img src={l.photo} style={{width:"100%",height:"100%",objectFit:"cover",borderRadius:10}} alt=""/>:"💐"}
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:14,fontWeight:600,color:"#fff",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.title||"Букет"}</div>
+                    <div style={{fontSize:12,color:"rgba(255,255,255,0.35)"}}>📍 {l.city} · {l.price} ₸</div>
+                    <div style={{fontSize:11,color:"#4ade80",marginTop:2}}>📞 {l.sellerPhone} · {l.sellerName}</div>
+                  </div>
+                  <button style={{background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.2)",borderRadius:8,padding:"6px 10px",color:"#f87171",fontSize:12}} onClick={()=>reject(l.id)}>
+                    Удалить
+                  </button>
+                </div>
               </div>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:14,fontWeight:600,color:"#fff",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.title||"Букет"}</div>
-                <div style={{fontSize:12,color:"rgba(255,255,255,0.35)"}}>📍 {l.city} · {l.price} ₸</div>
-              </div>
-              <span style={{fontSize:11,padding:"3px 10px",borderRadius:20,background:"rgba(74,222,128,0.1)",color:"#4ade80",border:"1px solid rgba(74,222,128,0.2)"}}>✓ Активно</span>
-            </div>
-          </div>
-        ))}
+            ))
+        )}
       </div>
     </Shell>
   );
