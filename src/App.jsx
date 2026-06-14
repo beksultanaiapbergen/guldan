@@ -78,7 +78,7 @@ export default function App() {
     return unsub;
   },[]);
 
-  // Добавить заявку в pending
+  // Добавить заявку в pending + уведомление в Telegram
   const addPending = async l => {
     await addDoc(collection(db,"pending"), {
       ...l,
@@ -86,6 +86,15 @@ export default function App() {
       createdAt: serverTimestamp(),
       at: new Date().toLocaleString("ru-KZ"),
     });
+    // Telegram уведомление
+    const token = "7923187673:AAHOk36_Bj_X-MiDc89SQbfqqGDvVwSSy70";
+    const chatId = "6413726217";
+    const msg = `🌸 *Новая заявка на публикацию!*\n\n💐 *${l.title||"Букет"}* — ${l.price} ₸\n📍 Город: ${l.city}\n👤 Продавец: ${l.sellerName}\n📞 Телефон: ${l.sellerPhone}\n🌿 Свежесть: ${["Только срезаны","Вчера срезаны","2–3 дня назад"][l.freshness]||""}\n\n✅ Зайдите в админку для одобрения\n🔑 Код: 8775`;
+    fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: msg, parse_mode: "Markdown" }),
+    }).catch(()=>{});
   };
 
   // Одобрить — перенести из pending в listings
